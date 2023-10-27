@@ -1,0 +1,58 @@
+```{r}
+###Construct artificial gold standard bulk data set
+bulk_construct = function(eset, clusters, samples, select.ct = NULL){
+  if(!is.null(select.ct)){
+    s.ct = sampleNames(eset)[as.character(pData(eset)[, clusters]) %in% select.ct]
+    eset <- eset[, s.ct, drop = FALSE]
+  }
+  mdf = pData(eset)
+  mdf$index = 1:ncol(eset);
+  rdf <-ddply(mdf, samples, function(x){
+    rowSums(exprs(eset[, x$index]) )
+  })
+  bulk.counts = t(data.matrix(rdf[,-1]))
+  colnames(bulk.counts) = rdf[,1]
+  
+  ctdf = ddply(mdf, samples, function(x){
+    summary(x[, clusters])
+  })
+  num.real = ctdf[, -1]
+  rownames(num.real) = ctdf[, 1]
+  
+  
+  bulk.pData = ddply(mdf, samples, function(x){
+    x[1, setdiff(colnames(x), c(clusters, samples,'index')) ]
+  })
+  
+  rownames(bulk.pData) = bulk.pData[, 1]
+  metadata <- data.frame(labelDescription= colnames(bulk.pData), row.names= colnames(bulk.pData) )
+  Bulk.counts = ExpressionSet(assayData = bulk.counts, phenoData = new("AnnotatedDataFrame", data = bulk.pData, varMetadata = metadata))
+  return(list(Bulk.counts = Bulk.counts, num.real = num.real))
+}
+```
+
+```{r}
+#######################################################
+##getESET To get the expression set, combine the row name + column name + expression matrix --> object
+#' Get ExpressionSet
+#' @description Use Pdata, Fdata, and count matrix to derive ExpressionSet Object
+#' @name getESET
+#' @import Biobase
+#' @param exprs raw count matrix
+#' @param fdata feature data, for genes, usually it's gene name
+#' @param pdata pheno data, for samples, usually it's the characteristics for each single cell/bulk sample, including name, gender, age, cluster, disease,...
+#' @export
+library(Biobase)
+getESET <- function(exprs, fdata, pdata){
+  pdata <- as.data.frame(pdata)
+  fdata <- as.data.frame(fdata)
+  exprs <- as.matrix(exprs)
+  rownames(pdata) <- colnames(exprs)
+  rownames(fdata) <- rownames(exprs)
+  eset <- ExpressionSet(exprs,
+                        AnnotatedDataFrame(pdata),
+                        AnnotatedDataFrame(fdata))
+}
+```
+
+

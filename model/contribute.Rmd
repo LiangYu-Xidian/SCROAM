@@ -1,0 +1,431 @@
+---
+title: "contribute"
+output: html_document
+---
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+setwd("D:/bulk_sc/contribute")
+```
+
+```{r}
+library(Seurat)
+```
+```{r}
+save.image("ours_method.Rdata")
+```
+
+
+```{r}
+##Single samples are also available
+# count.filter.norm=as.matrix(bulk_data) ##After bulk data preprocessing
+# basis.norm=as.matrix(data)  ##scRNA-seq Cell-specific expression matrix
+deconv_simple <- function(count.filter.norm, basis.norm, iter.max = 1000, nu = 1e-9, epsilon = 0.001,
+                          truep = NULL){
+  rownames_est<-colnames(count.filter.norm)
+  ALS.S <- rep(1, ncol(basis.norm))
+  N.bulk <- ncol(count.filter.norm) ##bulk sample size
+  common.gene <- intersect(rownames(count.filter.norm), rownames(basis.norm)) ##Genes shared by bulk and single cells
+  count.filter.norm <- count.filter.norm[common.gene,]
+  basis.norm <- basis.norm[common.gene,]
+  count.filter.norm<-as.matrix(count.filter.norm)
+  prop.est.mvw <- NULL ##The results of the evaluation
+  
+  for (i in 1:N.bulk) {
+    xbulk.temp <- count.filter.norm[,i]
+    message(paste(colnames(count.filter.norm)[i], "has common genes",
+                  sum(count.filter.norm[, i] != 0), "..."))
+    lm <- nnls::nnls(A = basis.norm, b = xbulk.temp)
+    delta <- lm$residuals
+    wt.gene <- 1/(nu + delta^2)
+    x.wt <- xbulk.temp * sqrt(wt.gene)
+    b.wt <- sweep(basis.norm, 1, sqrt(wt.gene), "*")
+    lm.wt <- nnls::nnls(A = b.wt, b = x.wt)
+    prop.wt <- lm.wt$x/sum(lm.wt$x)
+    delta <- lm.wt$residuals
+    for (iter in 1:iter.max) {
+      wt.gene <- 1/(nu + delta^2)
+      x.wt <- xbulk.temp * sqrt(wt.gene)
+      b.wt <- sweep(basis.norm, 1, sqrt(wt.gene), "*")
+      lm.wt <- nnls::nnls(A = b.wt, b = x.wt)
+      delta.new <- lm.wt$residuals
+      prop.wt.new <- lm.wt$x/sum(lm.wt$x)
+      if (sum(abs(prop.wt.new - prop.wt)) < epsilon) {
+        prop.wt <- prop.wt.new
+        delta <- delta.new
+        message("WNNLS Converged at iteration ",
+                iter)
+        break
+      }
+      prop.wt <- prop.wt.new
+      delta <- delta.new
+    }
+    prop.est.mvw <- rbind(prop.est.mvw, prop.wt)
+    
+  }
+  colnames(prop.est.mvw) <- colnames(basis.norm)
+  rownames(prop.est.mvw) <- rownames_est
+ # rownames(prop.est.mvw) <- colnames(count.filter.norm)
+  return(list(prop.est.mvw = prop.est.mvw))
+}
+
+```
+
+
+
+```{r}
+###############################################
+##contribute Obtain cell-specific expression matrix
+#' Evaluate deconvolved proportions
+#' @name contribute
+#' @export
+contribute <- function(object, orig.ident="celltype",beta = 0.15,mu=1,t=1){
+  library(Seurat)
+  ##Get average expression
+  Idents(object)<-orig.ident ##This step can specify which group's average expression is to be calculated. You can select cell type (cell type) cluster (seurat_cluster) or sample type (orig.ident)
+  AverageExp <- AverageExpression(object)
+  gepsdf <- as.data.frame(AverageExp$RNA) ##Get the average expression level of data data in RNA
+  
+  collength<-length(gepsdf[1,]) ##Determine how many data types there are
+  
+  ##Get the contribution of each gene
+  marker_cosbeta<-cosgbeta(
+  object,
+  groups='all',
+  assay='RNA',
+  slot='data',
+  beta = beta,
+  mu=mu,
+  t=t)
+
+  
+ celltype<-colnames(gepsdf)
+ collength<-length(gepsdf[1,]) ##Determine how many data types there are
+ genes<-rownames(gepsdf)
+ rowlength<-length(genes)  ##Determine how many genes there are in total
+
+ ##Determine differential gene names and scores
+  features=list()
+  scores=list()
+ ##final output matrix
+ m=data.frame(matrix(matrix(), rowlength, collength, dimnames=list(seq(1,rowlength), celltype)),
+                     stringsAsFactors=F)
+
+  for(i in 1:collength){
+    
+    features[[i]]<-marker_cosbeta$names[,i]
+    features[[i]]=subset( features[[i]], features[[i]]!="NA")
+
+    scores[[i]]<-marker_cosbeta$scores[,i]
+    scores[[i]]=subset( scores[[i]], scores[[i]]!="NA")
+      
+    df<-as.data.frame(scores[[i]])
+    rownames(df)<-features[[i]]
+    colnames(df)<-c('score')
+    
+    df1<-as.data.frame(gepsdf[,i])
+    rownames(df1)<-genes
+    colnames(df1)<-c('gene')
+    df1[,1]<-0
+    
+    for (j in 1:length(features[[i]])){
+      #print(features1[j])
+  df1$gene[which(rownames(df1) ==features[[i]][j])] <- df$score[which(rownames(df) ==features[[i]][j])] 
+  }
+
+   m[,i]<-as.matrix(df1)
+   m[,i]<-1+log(1/(1-m[,i]))
+   m[,i]<-as.data.frame(m[,i])
+   
+  }
+ 
+ rownames(m)<-genes
+ colnames(m)<-colnames(marker_cosbeta$names)
+
+ m<-m[intersect(rownames(m),genes),intersect(colnames(m),celltype)]
+ 
+ data<-as.data.frame(as.matrix(m)*gepsdf)
+ 
+ return(data)
+ 
+
+}
+```
+
+
+```{r}
+##beta sets the threshold, the threshold of difference scores scores
+select_beta<-function(scores,beta){
+  scores<-
+  d <- data.frame(
+    x   = data.table::copy(scores),
+    indice=seq(1,length(scores)))
+
+  data.table::setDT(d) ##A conversion operation on data frame d to prevent stack overflow
+  data.table::setorder(d,-x) ##Sort descending
+  d<-d[d$x>=beta,]
+  n_top_indice<-d$indice
+  return(n_top_indice)
+}
+
+cosgbeta<-function(
+    object,
+    groups='all',
+    assay='RNA',
+    slot='data',
+    mu=1,
+    remove_lowly_expressed=TRUE,
+    expressed_pct=0.1,
+    #n_genes_user=1000,
+    beta=0.25,
+    t=1
+){
+   
+    ### Obtain the cellxgene data
+    genexcell<-Seurat::GetAssayData(object = object[[assay]], slot = slot)
+     
+    ##grroup_info Get group information
+    if (groups == 'all'){
+        group_info <- Seurat::Idents(object = object)
+    }else{ 
+        object <- subset(x = object, idents = groups)
+        group_info <- Seurat::Idents(object = object)
+    }
+    
+
+    ### unique groups
+    groups_order=sort(unique(group_info))
+    n_cluster=length(groups_order)
+
+    if (n_cluster == 1){
+        stop('Cannot perform marker gene identification on a single cluster.')}
+    
+
+    n_cell=ncol(genexcell)
+    n_gene=nrow(genexcell)
+    gene_name=rownames(genexcell)
+    
+    # ### If sepcifying too many genes to return
+    # if (n_genes_user>n_gene){
+    #     n_genes_user=n_gene
+    # }
+
+    ##cluster_mat matrix Ideal marker gene expression matrix
+    cluster_mat=matrix(0,nrow =n_cluster,ncol = n_cell)
+
+    order_i=1
+    ### Set gene lambda and gene omega
+    for (group_i in groups_order){
+        idx_i=group_info==group_i 
+        cluster_mat[order_i,idx_i]=1
+        order_i=order_i+1
+    }
+
+
+    cluster_mat_sparse=as(cluster_mat, "dgCMatrix")
+    ### Calculate the cosine similarity
+    ##The cosine similarity value of each gene to the ideal gene in each cluster dim=gene*cluster
+    cosine_sim=proxyC::simil(genexcell,cluster_mat_sparse, method = "cosine",drop0=TRUE)
+    
+    ##Because division is done below, first clear the ones that are 0.
+    pos_nonzero = cosine_sim != 0 ##Record non-zero values
+    pos_nonzero=which(as.matrix(pos_nonzero),arr.ind = TRUE)  ##Convert non-zero values in the matrix into indicator vectors. The first column corresponds to the row name and the second column corresponds to the column name.
+    
+    #### Second-stage
+    if(t==1){
+    genexlambda=cosine_sim #*cosine_sim
+    }else{
+      genexlambda=cosine_sim *cosine_sim
+    }
+    e_power2_sum=Matrix::rowSums(genexlambda)
+
+    ##Normalization of the proportion of genes in the corresponding group
+    if (mu==1){
+         genexlambda[pos_nonzero]=genexlambda[pos_nonzero]/(replicate(ncol(genexlambda),e_power2_sum)[as.matrix(pos_nonzero)])
+    }else{
+        genexlambda[pos_nonzero]=genexlambda[pos_nonzero]/((
+            (1-mu)*genexlambda[pos_nonzero] + mu * (replicate(ncol(genexlambda),e_power2_sum)[as.matrix(pos_nonzero)])
+        ))
+    }
+
+    genexlambda=genexlambda*cosine_sim
+
+    # rank_stats_names=data.frame(matrix(matrix(), n_genes_user, length(groups_order),
+    #                     dimnames=list(seq(1,n_genes_user), groups_order)),
+    #                     stringsAsFactors=F)
+    # rank_stats_scores=data.frame(matrix(matrix(), n_genes_user, length(groups_order),
+    #                     dimnames=list(seq(1,n_genes_user), groups_order)),
+    #                     stringsAsFactors=F)
+    
+   a<-list()
+   b<-list()
+   
+    order_i=1
+    ### Set gene lambda and gene omega
+    for (group_i in groups_order){
+        idx_i=group_info==group_i 
+        scores=genexlambda[,order_i]
+      
+        ### Mask these genes expressed in less than given percentage of cells in the cluster of interest
+        if(remove_lowly_expressed){
+            # https://stackoverflow.com/questions/51560456/r-package-matrix-get-number-of-non-zero-entries-per-rows-columns-of-a-sparse
+            n_cells_expressed=tabulate(genexcell[,idx_i]@i + 1) ##Count the number of occurrences of each gene in each cluster
+            n_cells_i=sum(idx_i)  ##number of cells in each clusterMask these genes that are expressed in less than a given percentage of cells in the target cluster. These are error genes. That is to say, if this gene is a marker gene for this cluster, it must first be expressed in at least 10% of the cells in this cluster.
+        }
+                global_indices = select_beta(scores, beta)  ##golobal_indices is to get the subscripts of the top (n_genes_user) genes after arranging the scores in descending order.
+     
+       rank_stats_names=data.frame(matrix(matrix(), length(global_indices), 1,
+                        dimnames=list(seq(1,length(global_indices)), 1)),
+                        stringsAsFactors=F)
+      
+       rank_stats_scores=data.frame(matrix(matrix(), length(global_indices), 1,
+                        dimnames=list(seq(1,length(global_indices)), 1)),
+                        stringsAsFactors=F)
+        
+        rank_stats_names[,1]=gene_name[global_indices] ##Top gene names
+        rank_stats_scores[,1]=scores[global_indices]  ##Top scores
+      
+        a[[group_i]]<-as.matrix(rank_stats_names)
+        b[[group_i]]<-as.matrix(rank_stats_scores)
+        ### save the group names
+        order_i=order_i+1
+    }
+
+    a<- as.data.frame(do.call(cbind, lapply(lapply(a, unlist), `length<-`, max(lengths(a)))))
+    b<- as.data.frame(do.call(cbind, lapply(lapply(b, unlist), `length<-`, max(lengths(b)))))
+    colnames(a) <- groups_order ##Corresponding cluster name
+    colnames(b) <- groups_order
+    
+    # ###Get the name and score of a cluster's marker gene
+    # ranks_stats=list(
+    #     names=rank_stats_names,
+    #     scores=rank_stats_scores
+    # 
+    # )
+    
+        ###Get the name and score of a cluster's marker gene
+    ranks_stats=list(
+        names=a,
+        scores=b
+
+    )
+    ### return
+    return(ranks_stats)
+}
+
+
+```
+
+
+```{r}
+##pest must be a list data structure to judge
+###############################################
+##SCDC_peval Evaluation function evaluates the proportion of cells generated by bulk samples. The indicators used are Pearson correlation coefficient and mean square error.
+#' Evaluate deconvolved proportions
+#' @description Evaluation function, for deconvolved proportions and the actual/true proportions
+#' @name SCDC_peval
+#' @param ptrue a matrix of true/actual cell-type proportions for bulk samples
+#' @param pest a list of estimated cell-type proportion matrix
+#' @param pest.names method name for the estimated proportions in the pest list
+#' @param select.ct selected cell types for deconvolution
+#' @export
+SCDC_peval <- function(ptrue, pest, pest.names, select.ct = NULL){
+  if (!is.list(pest)){
+    pest <- list(pest)
+  }
+  if (!is.data.frame(ptrue)){
+  ptrue <- as.data.frame.matrix(ptrue)
+  }
+  n_est <- length(pest)
+  sample_names <- lapply(pest, rownames)
+  ctype_names <- lapply(pest, colnames)
+  sample_common <- Reduce(intersect, sample_names)
+  ctype_common <- Reduce(intersect, ctype_names)
+  celltype <- intersect(colnames(ptrue), ctype_common)
+  if (!is.null(select.ct)) {
+    celltype <- intersect(celltype, select.ct)
+  }
+  sample <- intersect(rownames(ptrue), sample_common)
+  N <- length(sample)
+  K <- length(celltype)
+  if (N < 1) {
+    stop("No common Subjects! Check rowname!")
+  }
+  if (K <= 1) {
+    stop("Not enough cell types!")
+  }
+  ptrue.use <- ptrue[intersect(rownames(ptrue), sample), intersect(colnames(ptrue), celltype)]
+  ptrue.use <- as.data.frame.matrix(ptrue.use / apply(ptrue.use,1,sum))
+  ptrue.use[is.na(ptrue.use)] <- 0
+
+  # for each estimation method in the list
+  evals <- lapply(pest, function(xx){
+    pest.use <- xx[intersect(rownames(xx), sample), intersect(colnames(xx), celltype)]
+    pest.use <- as.data.frame.matrix(pest.use / apply(pest.use,1,sum))
+    pest.use <- pest.use[rownames(ptrue.use),colnames(ptrue.use)]
+    RMSD_bysample <- round(sqrt(rowMeans((ptrue.use - pest.use)^2)), digits = 5)
+    mAD_bysample <- round(rowMeans(abs(ptrue.use - pest.use)), digits = 5)
+    Pearson_bysample <- sapply(1:nrow(ptrue.use), function(ss) {
+	round(cor(c(as.matrix(ptrue.use[ss, ])), c(as.matrix(pest.use[ss, ]))), digits = 5)
+	})
+    print(pest.use)
+    print(ptrue.use)
+    RMSD <- round(sqrt(mean(as.matrix((ptrue.use - pest.use)^2), na.rm = T)), digits = 5)
+    mAD <- round(mean(as.matrix(abs(ptrue.use - pest.use)), na.rm = T), digits = 5)
+    Pearson <- round(cor(c(as.matrix(ptrue.use)), c(as.matrix(pest.use))), digits = 4)
+
+    return(list(pest.use = pest.use, ptrue.use=ptrue.use,RMSD_bysample = RMSD_bysample, mAD_bysample = mAD_bysample, Pearson_bysample = Pearson_bysample,
+                RMSD = RMSD, mAD = mAD, Pearson = Pearson))
+  })
+  evals.table <- NULL
+  for (l in 1:n_est){
+    evals.table <- rbind(evals.table, c(evals[[l]]$RMSD, evals[[l]]$mAD, evals[[l]]$Pearson))
+  }
+  colnames(evals.table) <- c("RMSD","mAD","R")
+  rownames(evals.table) <- pest.names
+  # evals per sample
+  pearson.sample.table <- NULL
+  for (l in 1:n_est){
+    pearson.sample.table <- rbind(pearson.sample.table,evals[[l]]$Pearson_bysample)
+  }
+  rownames(pearson.sample.table) <- pest.names
+  colnames(pearson.sample.table) <- rownames(ptrue.use)
+
+  RMSD.sample.table <- NULL
+  for (l in 1:n_est){
+    RMSD.sample.table <- rbind(RMSD.sample.table,evals[[l]]$RMSD_bysample)
+  }
+  rownames(RMSD.sample.table) <- pest.names
+  colnames(RMSD.sample.table) <- rownames(ptrue.use)
+
+  mAD.sample.table <- NULL
+  for (l in 1:n_est){
+    mAD.sample.table <- rbind(mAD.sample.table,evals[[l]]$mAD_bysample)
+  }
+  rownames(mAD.sample.table) <- pest.names
+  colnames(mAD.sample.table) <- rownames(ptrue.use)
+
+  return(list(evals = evals, evals.table = evals.table, pearson.sample.table = pearson.sample.table,
+              RMSD.sample.table = RMSD.sample.table, mAD.sample.table = mAD.sample.table))
+}
+```
+
